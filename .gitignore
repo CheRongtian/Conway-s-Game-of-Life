@@ -1,3 +1,5 @@
 *.md
 !README.md
-Improved
+/build/
+/LifeLab
+/Improved
