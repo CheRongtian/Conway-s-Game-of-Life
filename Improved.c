@@ -251,6 +251,37 @@ typedef struct
     VerificationResult failure_reason;
 } GliderTracker;
 
+typedef struct
+{
+    const PatternSpec *pattern;
+    WorldAnchor pattern_origin;
+    SignalState incoming_glider;
+    uint64_t simulation_limit;
+} CollisionScenario;
+
+typedef enum
+{
+    COLLISION_RUN_FAILED,
+    COLLISION_RUN_RUNNING,
+    COLLISION_RUN_ABSORBED,
+    COLLISION_RUN_TIMEOUT
+} CollisionRunState;
+
+typedef struct
+{
+    CollisionScenario scenario;
+    uint8_t (*current)[WIDTH + 2];
+    uint8_t (*next)[WIDTH + 2];
+    uint64_t generation;
+    GliderTracker tracker;
+    StraightRoute route;
+    EaterEndpoint eater_endpoint;
+    CollisionRunState state;
+    VerificationResult verification_result;
+} CollisionRun;
+
+static int signal_states_equal(SignalState a, SignalState b);
+
 static uint8_t board_a[HEIGHT + 2][WIDTH + 2];
 static uint8_t board_b[HEIGHT + 2][WIDTH + 2];
 static uint8_t target[CANVAS_HEIGHT][CANVAS_WIDTH];
@@ -2084,6 +2115,165 @@ static VerificationResult observe_eater1_route(
     advance_verified_tracker(tracker);
 
     return VERIFY_OK;
+}
+
+static int build_eater1_collision_scenario(
+    CollisionScenario *scenario)
+{
+    EaterEndpoint endpoint;
+    StraightRoute route;
+
+    if (!scenario || !configure_eater1_demo(&endpoint, &route))
+        return 0;
+
+    scenario->pattern = &eater1_pattern;
+    scenario->pattern_origin = endpoint.origin;
+    scenario->incoming_glider = route.initial_signal;
+    scenario->simulation_limit =
+        endpoint.scheduled_input_generation +
+        endpoint.restore_generation_offset +
+        EATER_STABILITY_GENERATIONS;
+
+    return 1;
+}
+
+static int initialize_collision_run(
+    CollisionRun *run,
+    const CollisionScenario *scenario)
+{
+    if (!run) return 0;
+
+    memset(run, 0, sizeof(*run));
+    run->state = COLLISION_RUN_FAILED;
+
+    if (!scenario ||
+        scenario->pattern != &eater1_pattern ||
+        scenario->incoming_glider.generation != 0 ||
+        !configure_eater1_demo(
+            &run->eater_endpoint,
+            &run->route))
+        return 0;
+
+    if (scenario->pattern_origin.x != run->eater_endpoint.origin.x ||
+        scenario->pattern_origin.y != run->eater_endpoint.origin.y ||
+        !signal_states_equal(
+            scenario->incoming_glider,
+            run->route.initial_signal) ||
+        glider_overlaps_pattern(
+            scenario->incoming_glider,
+            scenario->pattern,
+            scenario->pattern_origin))
+        return 0;
+
+    memset(board_a, 0, sizeof(board_a));
+    memset(board_b, 0, sizeof(board_b));
+
+    place_pattern_generation0(
+        board_a,
+        scenario->pattern,
+        scenario->pattern_origin
+    );
+
+    if (!place_glider_generation0(
+            board_a,
+            scenario->incoming_glider))
+        return 0;
+
+    run->scenario = *scenario;
+    run->current = board_a;
+    run->next = board_b;
+    run->generation = 0;
+    run->verification_result = VERIFY_OK;
+    run->state = COLLISION_RUN_RUNNING;
+    initialize_glider_tracker(
+        &run->tracker,
+        scenario->incoming_glider
+    );
+    run->tracker.drawing_enabled = 0;
+
+    return 1;
+}
+
+static CollisionRunState observe_collision_run(CollisionRun *run)
+{
+    if (!run || run->state != COLLISION_RUN_RUNNING)
+        return run ? run->state : COLLISION_RUN_FAILED;
+
+    run->verification_result = observe_eater1_route(
+        run->current,
+        &run->tracker,
+        &run->route,
+        &run->eater_endpoint,
+        run->generation
+    );
+
+    if (run->verification_result != VERIFY_OK ||
+        run->tracker.state == TRACKER_FAILED) 
+    {
+        run->state = COLLISION_RUN_FAILED;
+        return run->state;
+    }
+
+    if (run->tracker.state == TRACKER_ABSORBED) 
+    {
+        run->state = COLLISION_RUN_ABSORBED;
+        return run->state;
+    }
+
+    if (run->generation >= run->scenario.simulation_limit)
+        run->state = COLLISION_RUN_TIMEOUT;
+
+    return run->state;
+}
+
+static int step_collision_run(CollisionRun *run)
+{
+    if (!run || run->state != COLLISION_RUN_RUNNING)
+        return 0;
+
+    if (run->generation >= run->scenario.simulation_limit) 
+    {
+        run->state = COLLISION_RUN_TIMEOUT;
+        return 0;
+    }
+
+    step(run->current, run->next);
+
+    uint8_t (*tmp)[WIDTH + 2] = run->current;
+    run->current = run->next;
+    run->next = tmp;
+    run->generation += 1;
+
+    return 1;
+}
+
+static CollisionRunState run_collision_headless(
+    const CollisionScenario *scenario,
+    CollisionRun *run)
+{
+    if (!initialize_collision_run(run, scenario))
+        return COLLISION_RUN_FAILED;
+
+    while (observe_collision_run(run) == COLLISION_RUN_RUNNING)
+        step_collision_run(run);
+
+    return run->state;
+}
+
+static const char *collision_run_state_name(CollisionRunState state)
+{
+    switch (state) 
+    {
+        case COLLISION_RUN_RUNNING:
+            return "RUNNING";
+        case COLLISION_RUN_ABSORBED:
+            return "ABSORBED";
+        case COLLISION_RUN_TIMEOUT:
+            return "TIMEOUT";
+        case COLLISION_RUN_FAILED:
+        default:
+            return "FAILED";
+    }
 }
 
 static int phase_2a_pattern_matches(
@@ -4264,20 +4454,22 @@ static int run_phase_5a_tests(void)
 
 static void update_window_title(
     SDL_Window *window,
-    uint64_t generation,
-    int paused,
-    int show_target)
+    const CollisionRun *run,
+    int paused)
 {
     char title[WINDOW_TITLE_SIZE];
+    const char *state = collision_run_state_name(run->state);
+
+    if (run->state == COLLISION_RUN_RUNNING && paused)
+        state = "PAUSED";
 
     snprintf(
         title,
         sizeof(title),
-        "TEXT: %s | GEN: %llu | %s | TARGET: %s",
-        input_text,
-        (unsigned long long)generation,
-        paused ? "PAUSED" : "RUNNING",
-        show_target ? "ON" : "OFF"
+        "Conway Collision Lab | Eater 1 | GEN: %llu / %llu | %s | Space Pause | N Step | R Reset | Esc Quit",
+        (unsigned long long)run->generation,
+        (unsigned long long)run->scenario.simulation_limit,
+        state
     );
 
     SDL_SetWindowTitle(window, title);
@@ -4285,8 +4477,7 @@ static void update_window_title(
 
 static void render(
     SDL_Renderer *renderer,
-    uint8_t board[HEIGHT + 2][WIDTH + 2],
-    int show_target)
+    uint8_t board[HEIGHT + 2][WIDTH + 2])
 {
     SDL_SetRenderDrawColor(renderer, 5, 8, 15, 255);
     SDL_RenderClear(renderer);
@@ -4302,49 +4493,6 @@ static void render(
                 x * CELL_SIZE + CELL_SIZE / 2,
                 y * CELL_SIZE + CELL_SIZE / 2
             );
-        }
-    }
-
-    if (show_target) 
-    {
-        SDL_SetRenderDrawColor(renderer, 110, 120, 255, 90);
-
-        for (int v = 0; v < CANVAS_HEIGHT; ++v) 
-        {
-            for (int u = 0; u < CANVAS_WIDTH; ++u) 
-            {
-                if (!target[v][u]) continue;
-
-                SDL_Rect pixel =
-                {
-                    (CANVAS_X0 + u * CANVAS_PITCH) * CELL_SIZE,
-                    (CANVAS_Y0 + v * CANVAS_PITCH) * CELL_SIZE,
-                    CANVAS_PITCH * CELL_SIZE,
-                    CANVAS_PITCH * CELL_SIZE
-                };
-
-                SDL_RenderFillRect(renderer, &pixel);
-            }
-        }
-    }
-
-    SDL_SetRenderDrawColor(renderer, 40, 230, 255, 255);
-
-    for (int v = 0; v < CANVAS_HEIGHT; ++v) 
-    {
-        for (int u = 0; u < CANVAS_WIDTH; ++u) 
-        {
-            if (!trail[v][u]) continue;
-
-            SDL_Rect pixel =
-            {
-                (CANVAS_X0 + u * CANVAS_PITCH) * CELL_SIZE,
-                (CANVAS_Y0 + v * CANVAS_PITCH) * CELL_SIZE,
-                CANVAS_PITCH * CELL_SIZE,
-                CANVAS_PITCH * CELL_SIZE
-            };
-
-            SDL_RenderFillRect(renderer, &pixel);
         }
     }
 
@@ -4373,13 +4521,9 @@ static void render(
 
 int main(void)
 {
-    uint8_t (*current)[WIDTH + 2] = board_a;
-    uint8_t (*next)[WIDTH + 2] = board_b;
-    uint64_t generation = 0;
-    GliderTracker tracker;
-    StraightRoute route;
+    CollisionScenario scenario;
+    CollisionRun run;
     int paused = 0;
-    int show_target = 1;
 
     if (PHASE_2A_TEST_MODE)
         return run_phase_2a_tests() ? 0 : 1;
@@ -4396,23 +4540,26 @@ int main(void)
     if (PHASE_5A_TEST_MODE)
         return run_phase_5a_tests() ? 0 : 1;
 
-    if (!read_input_text()) return 1;
-
-    build_target();
-    if (!reset_eater1_world(
-            &current,
-            &next,
-            &generation,
-            &paused,
-            &tracker,
-            &route,
-            &runtime_eater1_endpoint))
+    if (!build_eater1_collision_scenario(&scenario)) 
+    {
+        fprintf(stderr, "Unable to build the Eater 1 collision scenario.\n");
         return 1;
+    }
 
-    SDL_Init(SDL_INIT_VIDEO);
+    if (!initialize_collision_run(&run, &scenario)) 
+    {
+        fprintf(stderr, "Unable to initialize the collision run.\n");
+        return 1;
+    }
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) 
+    {
+        fprintf(stderr, "SDL initialization failed: %s\n", SDL_GetError());
+        return 1;
+    }
 
     SDL_Window *window = SDL_CreateWindow(
-        "Conway's Game of Life",
+        "Conway Collision Lab",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         WIDTH * CELL_SIZE,
@@ -4420,16 +4567,30 @@ int main(void)
         0
     );
 
+    if (!window) 
+    {
+        fprintf(stderr, "SDL window creation failed: %s\n", SDL_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
     SDL_Renderer *renderer = SDL_CreateRenderer(
         window,
         -1,
         SDL_RENDERER_ACCELERATED
     );
 
+    if (!renderer) 
+    {
+        fprintf(stderr, "SDL renderer creation failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
     int running = 1;
-    int title_dirty = 1;
     SDL_Event event;
 
     while (running) 
@@ -4442,73 +4603,39 @@ int main(void)
             {
                 if (event.key.keysym.sym == SDLK_ESCAPE) running = 0;
 
-                if (event.key.keysym.sym == SDLK_SPACE) 
+                if (event.key.keysym.sym == SDLK_SPACE &&
+                    run.state == COLLISION_RUN_RUNNING) 
                 {
                     paused = !paused;
-                    title_dirty = 1;
                 }
 
-                if (event.key.keysym.sym == SDLK_n && paused) 
+                if (event.key.keysym.sym == SDLK_n &&
+                    paused &&
+                    run.state == COLLISION_RUN_RUNNING) 
                 {
-                    step(current, next);
-
-                    uint8_t (*tmp)[WIDTH + 2] = current;
-                    current = next;
-                    next = tmp;
-
-                    generation += 1;
-                    title_dirty = 1;
-                }
-
-                if (event.key.keysym.sym == SDLK_t) 
-                {
-                    show_target = !show_target;
-                    title_dirty = 1;
+                    step_collision_run(&run);
                 }
 
                 if (event.key.keysym.sym == SDLK_r) 
                 {
-                    if (!reset_eater1_world(
-                            &current,
-                            &next,
-                            &generation,
-                            &paused,
-                            &tracker,
-                            &route,
-                            &runtime_eater1_endpoint))
+                    if (!initialize_collision_run(&run, &scenario)) 
+                    {
+                        fprintf(stderr, "Unable to reset the collision run.\n");
                         running = 0;
-                    title_dirty = 1;
+                    }
+                    paused = 0;
                 }
             }
         }
 
-        observe_eater1_route(
-            current,
-            &tracker,
-            &route,
-            &runtime_eater1_endpoint,
-            generation
-        );
+        if (!running) break;
 
-        if (title_dirty) 
-        {
-            update_window_title(window, generation, paused, show_target);
-            title_dirty = 0;
-        }
+        observe_collision_run(&run);
+        update_window_title(window, &run, paused);
+        render(renderer, run.current);
 
-        render(renderer, current, show_target);
-
-        if (!paused) 
-        {
-            step(current, next);
-
-            uint8_t (*tmp)[WIDTH + 2] = current;
-            current = next;
-            next = tmp;
-
-            generation += 1;
-            title_dirty = 1;
-        }
+        if (!paused && run.state == COLLISION_RUN_RUNNING)
+            step_collision_run(&run);
 
         SDL_Delay(DELAY_MS);
     }
