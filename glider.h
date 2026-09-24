@@ -46,7 +46,8 @@ typedef enum
     VERIFY_COMPONENT_CONTRACT_MISMATCH,
     VERIFY_EATER_PATTERN_MISMATCH,
     VERIFY_REACTION_FRAME_MISMATCH,
-    VERIFY_COMPONENT_SAFETY_VIOLATION
+    VERIFY_COMPONENT_SAFETY_VIOLATION,
+    VERIFY_RECORDING_CAPACITY_EXCEEDED
 } VerificationResult;
 
 typedef struct
@@ -58,6 +59,14 @@ typedef struct
 
 SignalState glider_advance(SignalState signal);
 SignalState glider_rewind(SignalState signal);
+int glider_signal_is_valid(SignalState signal);
+int glider_get_live_cell(
+    SignalState signal,
+    int cell_index,
+    WorldAnchor *cell
+);
+const char *glider_direction_name(Direction direction);
+const char *glider_phase_name(GliderPhase phase);
 int glider_states_equal(SignalState a, SignalState b);
 int glider_geometry_matches(SignalState a, SignalState b);
 int glider_place_generation0(LifeBoard *board, SignalState signal);

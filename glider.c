@@ -37,7 +37,7 @@ static const CellOffset anchor_delta[DIRECTION_COUNT][PHASE_COUNT] =
     {{0, -1}, {0, 0}, {-1, 0}, {0, 0}}
 };
 
-static int glider_state_is_valid(SignalState signal)
+int glider_signal_is_valid(SignalState signal)
 {
     return signal.direction >= SE &&
            signal.direction < DIRECTION_COUNT &&
@@ -45,9 +45,61 @@ static int glider_state_is_valid(SignalState signal)
            signal.phase < PHASE_COUNT;
 }
 
+int glider_get_live_cell(
+    SignalState signal,
+    int cell_index,
+    WorldAnchor *cell)
+{
+    if (!cell || !glider_signal_is_valid(signal) ||
+        cell_index < 0 || cell_index >= GLIDER_CELL_COUNT)
+        return 0;
+
+    CellOffset offset =
+        glider_offsets[signal.direction][signal.phase][cell_index];
+    cell->x = signal.anchor.x + offset.x;
+    cell->y = signal.anchor.y + offset.y;
+    return 1;
+}
+
+const char *glider_direction_name(Direction direction)
+{
+    switch (direction)
+    {
+        case SE:
+            return "SE";
+        case SW:
+            return "SW";
+        case NE:
+            return "NE";
+        case NW:
+            return "NW";
+        case DIRECTION_COUNT:
+        default:
+            return "UNKNOWN";
+    }
+}
+
+const char *glider_phase_name(GliderPhase phase)
+{
+    switch (phase)
+    {
+        case P0:
+            return "P0";
+        case P1:
+            return "P1";
+        case P2:
+            return "P2";
+        case P3:
+            return "P3";
+        case PHASE_COUNT:
+        default:
+            return "UNKNOWN";
+    }
+}
+
 SignalState glider_advance(SignalState signal)
 {
-    if (!glider_state_is_valid(signal)) return signal;
+    if (!glider_signal_is_valid(signal)) return signal;
 
     CellOffset delta = anchor_delta[signal.direction][signal.phase];
 
@@ -61,7 +113,7 @@ SignalState glider_advance(SignalState signal)
 
 SignalState glider_rewind(SignalState signal)
 {
-    if (!glider_state_is_valid(signal) || signal.generation == 0)
+    if (!glider_signal_is_valid(signal) || signal.generation == 0)
         return signal;
 
     GliderPhase previous_phase =
@@ -92,7 +144,7 @@ int glider_geometry_matches(SignalState a, SignalState b)
 
 int glider_place_generation0(LifeBoard *board, SignalState signal)
 {
-    if (!board || !glider_state_is_valid(signal) ||
+    if (!board || !glider_signal_is_valid(signal) ||
         signal.generation != 0)
         return 0;
 
@@ -133,7 +185,7 @@ VerificationResult glider_verify(
     SignalState expected,
     uint64_t generation)
 {
-    if (!board || !glider_state_is_valid(expected))
+    if (!board || !glider_signal_is_valid(expected))
         return VERIFY_OUT_OF_EXPECTED_STATE;
 
     if (generation != expected.generation)

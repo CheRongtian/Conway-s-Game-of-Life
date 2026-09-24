@@ -3,8 +3,10 @@
 ## Build
 
 ```sh
-cmake -S . -B build
-cmake --build build
+mkdir build
+cd build
+cmake ..
+make
 ```
 
 ## Run

@@ -13,7 +13,11 @@ add_executable(LifeLab
     glider.c
     pattern.c
     eater1.c
+    outcome_analysis.c
     collision.c
+    collision_search.c
+    collision_replay.c
+    collision_browser.c
     render.c
 )
 
